@@ -33,12 +33,7 @@ async def fetch_candles(symbol: str,timeframe: str,limit: int=240)->pd.DataFrame
 
 
 async def fetch_history_candles(symbol: str,timeframe: str,target_bars: int=2160)->pd.DataFrame:
-    """Fetch older OKX candles with pagination.
-
-    Uses /api/v5/market/history-candles and `after=<oldest ts>` to request
-    records older than the oldest candle already received. We deliberately use
-    page size 100 for conservative compatibility with OKX pagination rules.
-    """
+    """Fetch paginated historical candles from OKX public market history."""
     inst=f'{symbol.upper()}-USDT-SWAP'; bar=TF_TO_OKX[timeframe]
     target=max(300,min(int(target_bars),9000))
     all_rows=[]; after=None; seen=set()
@@ -64,8 +59,17 @@ async def fetch_history_candles(symbol: str,timeframe: str,target_bars: int=2160
             await asyncio.sleep(0.12)
     if not all_rows:
         raise RuntimeError(f'No historical candles for {inst} {timeframe}')
-    df=_rows_to_df(all_rows)
-    return df.tail(target).reset_index(drop=True)
+    return _rows_to_df(all_rows).tail(target).reset_index(drop=True)
+
+
+async def fetch_backtest_candles(symbol: str,timeframe: str,target_bars: int=2160)->pd.DataFrame:
+    """Combine up to 300 recent candles with paginated historical candles."""
+    recent_task=asyncio.create_task(fetch_candles(symbol,timeframe,300))
+    history_task=asyncio.create_task(fetch_history_candles(symbol,timeframe,target_bars))
+    recent,history=await asyncio.gather(recent_task,history_task)
+    df=pd.concat([history,recent],ignore_index=True)
+    df=df.drop_duplicates('ts').sort_values('ts').reset_index(drop=True)
+    return df.tail(target_bars).reset_index(drop=True)
 
 
 async def fetch_public_metrics(symbol: str):
