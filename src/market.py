@@ -7,14 +7,15 @@ import pandas as pd
 BASE=os.getenv('OKX_BASE_URL','https://www.okx.com').rstrip('/')
 TF_TO_OKX={'5m':'5m','15m':'15m','1h':'1H','4h':'4H','1d':'1Dutc','1w':'1Wutc'}
 
-# OKX public history is rate-limited. Serialize heavy REST calls and reuse results briefly.
+# OKX public history is IP-rate-limited. Be deliberately conservative because
+# cloud egress IPs may be shared with other workloads.
 _HISTORY_LOCK=asyncio.Lock()
 _LAST_HISTORY_REQUEST=0.0
-_HISTORY_MIN_INTERVAL=float(os.getenv('OKX_HISTORY_MIN_INTERVAL','0.45'))
-_HISTORY_CACHE_TTL=int(os.getenv('OKX_HISTORY_CACHE_TTL','900'))
+_HISTORY_MIN_INTERVAL=float(os.getenv('OKX_HISTORY_MIN_INTERVAL','1.10'))
+_HISTORY_CACHE_TTL=int(os.getenv('OKX_HISTORY_CACHE_TTL','1800'))
 _HISTORY_CACHE={}
 
-async def _get(client, path, params, retries=5, rate_limited=False):
+async def _get(client, path, params, retries=6, rate_limited=False):
     global _LAST_HISTORY_REQUEST
     for attempt in range(retries):
         if rate_limited:
@@ -27,9 +28,9 @@ async def _get(client, path, params, retries=5, rate_limited=False):
         if r.status_code==429:
             retry_after=r.headers.get('Retry-After')
             try:
-                delay=float(retry_after) if retry_after else min(8.0,0.8*(2**attempt))
+                delay=float(retry_after) if retry_after else min(30.0,1.5*(2**attempt))
             except Exception:
-                delay=min(8.0,0.8*(2**attempt))
+                delay=min(30.0,1.5*(2**attempt))
             await asyncio.sleep(delay)
             continue
         r.raise_for_status()
@@ -37,7 +38,7 @@ async def _get(client, path, params, retries=5, rate_limited=False):
         if j.get('code')!='0':
             raise RuntimeError(j.get('msg') or f'OKX error {path}')
         return j.get('data') or []
-    raise RuntimeError('OKX rate limit: retries exhausted. Try again in a minute.')
+    raise RuntimeError('OKX rate limit persisted after retries. Wait 1–2 minutes and retry.')
 
 
 def _rows_to_df(rows):
@@ -60,7 +61,7 @@ async def fetch_candles(symbol: str,timeframe: str,limit: int=240)->pd.DataFrame
 
 
 async def fetch_history_candles(symbol: str,timeframe: str,target_bars: int=2160)->pd.DataFrame:
-    """Fetch historical candles with serialized requests, retries and short-lived cache."""
+    """Fetch historical candles with serialized requests, conservative pacing and cache."""
     inst=f'{symbol.upper()}-USDT-SWAP'; bar=TF_TO_OKX[timeframe]
     target=max(300,min(int(target_bars),9000))
     key=(symbol.upper(),timeframe,target)
@@ -69,18 +70,17 @@ async def fetch_history_candles(symbol: str,timeframe: str,target_bars: int=2160
         return cached[1].copy()
 
     async with _HISTORY_LOCK:
-        # Another task may have populated cache while we waited.
         cached=_HISTORY_CACHE.get(key)
         if cached and time.monotonic()-cached[0] < _HISTORY_CACHE_TTL:
             return cached[1].copy()
 
         all_rows=[]; after=None; seen=set()
-        async with httpx.AsyncClient(timeout=25.0) as client:
+        async with httpx.AsyncClient(timeout=35.0) as client:
             while len(all_rows) < target:
                 params={'instId':inst,'bar':bar,'limit':'100'}
                 if after is not None:
                     params['after']=str(after)
-                rows=await _get(client,'/api/v5/market/history-candles',params,retries=6,rate_limited=True)
+                rows=await _get(client,'/api/v5/market/history-candles',params,retries=7,rate_limited=True)
                 if not rows:
                     break
                 added=0
@@ -104,7 +104,7 @@ async def fetch_history_candles(symbol: str,timeframe: str,target_bars: int=2160
 async def fetch_backtest_candles(symbol: str,timeframe: str,target_bars: int=2160)->pd.DataFrame:
     """Fetch history first, then recent candles; avoids concurrent bursts against OKX."""
     history=await fetch_history_candles(symbol,timeframe,target_bars)
-    await asyncio.sleep(0.25)
+    await asyncio.sleep(0.6)
     recent=await fetch_candles(symbol,timeframe,300)
     df=pd.concat([history,recent],ignore_index=True)
     df=df.drop_duplicates('ts').sort_values('ts').reset_index(drop=True)
