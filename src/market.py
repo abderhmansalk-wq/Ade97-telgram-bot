@@ -12,16 +12,61 @@ async def _get(client, path, params):
     if j.get('code')!='0': raise RuntimeError(j.get('msg') or f'OKX error {path}')
     return j.get('data') or []
 
+
+def _rows_to_df(rows):
+    if not rows:
+        return pd.DataFrame(columns=['ts','open','high','low','close','vol'])
+    cols=['ts','open','high','low','close','vol','volCcy','volCcyQuote','confirm']
+    df=pd.DataFrame(rows,columns=cols[:len(rows[0])])
+    for c in ['open','high','low','close','vol']:
+        df[c]=pd.to_numeric(df[c],errors='coerce')
+    df['ts']=pd.to_datetime(pd.to_numeric(df.ts),unit='ms',utc=True)
+    return df.drop_duplicates('ts').sort_values('ts').reset_index(drop=True)
+
+
 async def fetch_candles(symbol: str,timeframe: str,limit: int=240)->pd.DataFrame:
     inst=f'{symbol.upper()}-USDT-SWAP'; bar=TF_TO_OKX[timeframe]
     async with httpx.AsyncClient(timeout=15.0) as client:
         rows=await _get(client,'/api/v5/market/candles',{'instId':inst,'bar':bar,'limit':str(min(limit,300))})
     if not rows: raise RuntimeError(f'No candles for {inst} {timeframe}')
-    cols=['ts','open','high','low','close','vol','volCcy','volCcyQuote','confirm']
-    df=pd.DataFrame(rows,columns=cols[:len(rows[0])])
-    for c in ['open','high','low','close','vol']: df[c]=pd.to_numeric(df[c],errors='coerce')
-    df['ts']=pd.to_datetime(pd.to_numeric(df.ts),unit='ms',utc=True)
-    return df.sort_values('ts').reset_index(drop=True)
+    return _rows_to_df(rows)
+
+
+async def fetch_history_candles(symbol: str,timeframe: str,target_bars: int=2160)->pd.DataFrame:
+    """Fetch older OKX candles with pagination.
+
+    Uses /api/v5/market/history-candles and `after=<oldest ts>` to request
+    records older than the oldest candle already received. We deliberately use
+    page size 100 for conservative compatibility with OKX pagination rules.
+    """
+    inst=f'{symbol.upper()}-USDT-SWAP'; bar=TF_TO_OKX[timeframe]
+    target=max(300,min(int(target_bars),9000))
+    all_rows=[]; after=None; seen=set()
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        while len(all_rows) < target:
+            params={'instId':inst,'bar':bar,'limit':'100'}
+            if after is not None:
+                params['after']=str(after)
+            rows=await _get(client,'/api/v5/market/history-candles',params)
+            if not rows:
+                break
+            added=0
+            for row in rows:
+                ts=int(row[0])
+                if ts not in seen:
+                    seen.add(ts); all_rows.append(row); added+=1
+            oldest=min(int(r[0]) for r in rows)
+            if after is not None and oldest >= int(after):
+                break
+            after=oldest
+            if added == 0 or len(rows) < 2:
+                break
+            await asyncio.sleep(0.12)
+    if not all_rows:
+        raise RuntimeError(f'No historical candles for {inst} {timeframe}')
+    df=_rows_to_df(all_rows)
+    return df.tail(target).reset_index(drop=True)
+
 
 async def fetch_public_metrics(symbol: str):
     inst=f'{symbol.upper()}-USDT-SWAP'
