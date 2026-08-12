@@ -5,6 +5,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from .service import analyze_symbol, format_report
 from .market import fetch_backtest_candles
 from .backtest import walk_forward
+from .optimizer import optimize_oos
 from .realtime import configure_hub, get_hub
 from .storage import should_send_alert
 
@@ -24,10 +25,10 @@ BACKTEST_CFG={
 }
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text('🤖 Crypto Multi-Agent Analyst V4.1 جاهز.\n/analyze BTC\n/scan\n/live\n/backtest BTC 1h\n/help')
+    await update.message.reply_text('🤖 Crypto Multi-Agent Analyst V4.2 جاهز.\n/analyze BTC\n/scan\n/live\n/backtest BTC 1h\n/validate BTC 1h\n/help')
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text('/analyze BTC — تحليل 6 فريمات + Agents + Order Flow\n/scan — فحص قائمة العملات\n/live — حالة WebSocket والبيانات اللحظية\n/backtest BTC 1h — Walk-forward تاريخي موسع + Calibration\nالإنذارات الدورية تعمل عند ضبط ADMIN_CHAT_ID.')
+    await update.message.reply_text('/analyze BTC — تحليل 6 فريمات + Agents + Order Flow\n/scan — فحص قائمة العملات\n/live — حالة WebSocket والبيانات اللحظية\n/backtest BTC 1h — Walk-forward تاريخي موسع + Calibration\n/validate BTC 1h — Optimization على Train ثم اختبار Out-of-Sample مستقل\nالإنذارات الدورية تعمل عند ضبط ADMIN_CHAT_ID.')
 
 async def analyze_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     symbol=(context.args[0] if context.args else 'BTC').upper().replace('USDT','').replace('-','')
@@ -65,14 +66,14 @@ async def backtest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text('الفريمات: 5m / 15m / 1h / 4h / 1d / 1w')
         return
     cfg=BACKTEST_CFG[timeframe]
-    msg=await update.message.reply_text(f'🧪 V4.1 Backtest موسع {symbol} {timeframe}... قد يستغرق قليلاً')
+    msg=await update.message.reply_text(f'🧪 V4.2 Backtest موسع {symbol} {timeframe}...')
     try:
         df=await fetch_backtest_candles(symbol,timeframe,cfg['bars'])
         min_history=min(210,max(80,len(df)//3))
         bt=walk_forward(df,timeframe,horizon=cfg['horizon'],min_history=min_history,step=cfg['step'])
         start=bt.start[:10] if bt.start else '?'; end=bt.end[:10] if bt.end else '?'
         text=(
-            f'🧪 V4.1 Backtest {symbol} — {timeframe}\n'
+            f'🧪 V4.2 Backtest {symbol} — {timeframe}\n'
             f'الفترة: {start} → {end}\n'
             f'Candles: {bt.bars} | Signals: {bt.samples}\n'
             f'Forward horizon: {bt.horizon_bars} bars\n\n'
@@ -84,11 +85,43 @@ async def backtest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             + _bins_text('Calibration الكلية',bt.calibration) + '\n\n'
             + _bins_text('LONG calibration',bt.long_calibration) + '\n\n'
             + _bins_text('SHORT calibration',bt.short_calibration) + '\n\n'
-            + '⚠️ النتيجة Walk-forward على البيانات المتاحة من OKX وليست ضماناً للأداء المستقبلي. نحتاج Out-of-sample قبل اعتماد أي نسبة كاحتمال حقيقي.'
+            + '⚠️ Signal Scores وليست احتمالات مضمونة.'
         )
         await msg.edit_text(text[:4000])
     except Exception as e:
-        await msg.edit_text(f'❌ خطأ Backtest V4.1: {e}')
+        await msg.edit_text(f'❌ خطأ Backtest V4.2: {e}')
+
+async def validate_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    symbol=(context.args[0] if context.args else 'BTC').upper().replace('USDT','').replace('-','')
+    timeframe=(context.args[1] if len(context.args)>1 else '1h').lower()
+    if timeframe not in BACKTEST_CFG:
+        await update.message.reply_text('الفريمات: 5m / 15m / 1h / 4h / 1d / 1w')
+        return
+    cfg=BACKTEST_CFG[timeframe]
+    msg=await update.message.reply_text(f'🧠 V4.2 Optimization + OOS {symbol} {timeframe}... قد يستغرق قليلاً')
+    try:
+        df=await fetch_backtest_candles(symbol,timeframe,cfg['bars'])
+        min_history=min(210,max(80,len(df)//3))
+        vr=optimize_oos(df,symbol,timeframe,horizon=cfg['horizon'],min_history=min_history,step=cfg['step'])
+        status='✅ PASS' if vr.status=='PASS' else ('⛔ NO TRADE' if vr.status=='NO_TRADE' else '⚠️ DATA غير كافية')
+        weights=' | '.join(f'{k}={v:.2f}' for k,v in vr.weights.items())
+        text=(
+            f'🧠 V4.2 OOS Validation {symbol} — {timeframe}\n'
+            f'Status: {status}\n\n'
+            f'Train rows: {vr.train_rows} | signals: {vr.train_signals}\n'
+            f'Train accuracy: {vr.train_accuracy:.1f}%\n\n'
+            f'OUT-OF-SAMPLE rows: {vr.test_rows} | signals: {vr.test_signals}\n'
+            f'OOS accuracy: {vr.test_accuracy:.1f}%\n'
+            f'OOS LONG: {vr.test_long_accuracy:.1f}% (n={vr.test_long_samples})\n'
+            f'OOS SHORT: {vr.test_short_accuracy:.1f}% (n={vr.test_short_samples})\n'
+            f'OOS coverage: {vr.coverage_pct:.1f}%\n\n'
+            f'Decision threshold: {vr.threshold:.2f}\n'
+            f'Optimized weights:\n{weights}\n\n'
+            'الـOptimization يرى Train فقط. القرار PASS/NO TRADE مبني على الجزء الأخير الذي لم يُستخدم في اختيار الأوزان.'
+        )
+        await msg.edit_text(text[:4000])
+    except Exception as e:
+        await msg.edit_text(f'❌ خطأ V4.2 OOS: {e}')
 
 async def live_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     hub=get_hub()
@@ -130,6 +163,7 @@ def main():
     app.add_handler(CommandHandler('scan',scan_cmd))
     app.add_handler(CommandHandler('live',live_cmd))
     app.add_handler(CommandHandler('backtest',backtest_cmd))
+    app.add_handler(CommandHandler('validate',validate_cmd))
     app.job_queue.run_repeating(alert_job, interval=300, first=20)
     app.run_polling(drop_pending_updates=True)
 
