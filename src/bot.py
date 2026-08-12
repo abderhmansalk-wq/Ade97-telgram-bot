@@ -29,10 +29,10 @@ BACKTEST_CFG={
 }
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text('🤖 Crypto Multi-Agent Analyst V4.5 جاهز.\n/analyze BTC\n/scan\n/live\n/validate45 BTC\n/help')
+    await update.message.reply_text('🤖 Crypto Multi-Agent Analyst V4.5.1 جاهز.\n/analyze BTC\n/scan\n/live\n/validate45 BTC\n/help')
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text('/analyze BTC — تحليل 6 فريمات + Agents + Order Flow\n/scan — فحص قائمة العملات\n/live — حالة WebSocket\n/backtest BTC 1h — Backtest تقليدي\n/validate44 BTC 1h — Rolling OOS + Fees/Slippage\n/validate45 BTC — V4.5 يفحص 15m/1h/4h حسب Trend/Range/High-Vol ويختار أفضل Bucket مثبت')
+    await update.message.reply_text('/analyze BTC — تحليل 6 فريمات + Agents + Order Flow\n/scan — فحص قائمة العملات\n/live — حالة WebSocket\n/backtest BTC 1h — Backtest تقليدي\n/validate44 BTC 1h — Rolling OOS + Fees/Slippage\n/validate45 BTC — V4.5.1 يفحص 15m/1h/4h بشكل متسلسل لتجنب Rate Limit')
 
 async def analyze_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     symbol=(context.args[0] if context.args else 'BTC').upper().replace('USDT','').replace('-','')
@@ -106,11 +106,14 @@ async def validate44_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def validate45_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     symbol=(context.args[0] if context.args else 'BTC').upper().replace('USDT','').replace('-','')
-    msg=await update.message.reply_text(f'🧪 V4.5 Regime scan {symbol}: 15m + 1h + 4h... قد يستغرق قليلاً')
+    msg=await update.message.reply_text(f'🧪 V4.5.1 Regime scan {symbol}: 15m → 1h → 4h... قد يستغرق 1–2 دقيقة')
     try:
-        tfs={'15m':3000,'1h':2160,'4h':720}
-        data=await asyncio.gather(*[fetch_backtest_candles(symbol,tf,bars) for tf,bars in tfs.items()])
-        frames={tf:df for tf,df in zip(tfs.keys(),data)}
+        # Smaller but still useful samples; fetched strictly sequentially to protect OKX IP rate limits.
+        tfs={'15m':1600,'1h':1200,'4h':720}
+        frames={}
+        for tf,bars in tfs.items():
+            frames[tf]=await fetch_backtest_candles(symbol,tf,bars)
+            await asyncio.sleep(1.5)
         vr=validate_v45(symbol,frames,fee_slippage_bps=8.0)
         status='✅ PASS' if vr.status=='PASS' else '⛔ NO TRADE'
         rows=[]
@@ -119,10 +122,10 @@ async def validate45_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             flag='✅' if b['status']=='PASS' else '•'
             rows.append(f"{flag} {b['timeframe']} | {b['regime']} | {b['side']} | n={b['trades']} | WR {b['win_rate']:.1f}% | EV {b['expectancy_r']:+.3f}R | folds+ {b['positive_folds']}/{b['folds']} | RR {b['rr']:.2f}")
         best=(f"أفضل Bucket مثبت: {vr.best_timeframe} / {vr.best_regime} / {vr.best_side} | EV {vr.best_expectancy_r:+.3f}R" if vr.status=='PASS' else 'لا يوجد Bucket يحقق شروط PASS حالياً.')
-        text=(f'🧪 V4.5 Regime-Specialized OOS {symbol}\nStatus: {status}\nCosts: {vr.fee_slippage_bps:.1f} bps round-trip\n{best}\n\nTop buckets:\n'+'\n'.join(rows)+"\n\nPASS يحتاج Edge صافي ≥ +0.05R، عدد صفقات كافٍ، ونتيجة موجبة في ≥2 نوافذ OOS مستقلة.")
+        text=(f'🧪 V4.5.1 Regime-Specialized OOS {symbol}\nStatus: {status}\nCosts: {vr.fee_slippage_bps:.1f} bps round-trip\n{best}\n\nTop buckets:\n'+'\n'.join(rows)+"\n\nPASS يحتاج Edge صافي ≥ +0.05R، عدد صفقات كافٍ، ونتيجة موجبة في ≥2 نوافذ OOS مستقلة.")
         await msg.edit_text(text[:4000])
     except Exception as e:
-        await msg.edit_text(f'❌ خطأ V4.5 Regime scan: {e}')
+        await msg.edit_text(f'❌ خطأ V4.5.1: {e}')
 
 async def live_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     hub=get_hub()
@@ -154,7 +157,6 @@ def main():
     app=ApplicationBuilder().token(TOKEN).post_init(post_init).build()
     for name,fn in [('start',start),('help',help_cmd),('analyze',analyze_cmd),('scan',scan_cmd),('live',live_cmd),('backtest',backtest_cmd),('validate',validate_cmd),('validate43',validate43_cmd),('validate44',validate44_cmd),('validate45',validate45_cmd)]:
         app.add_handler(CommandHandler(name,fn))
-    app.job_queue.run_repeating(alert_job, interval=300, first=20)
-    app.run_polling(drop_pending_updates=True)
+    app.job_queue.run_repeating(alert_job, interval=300, first=20); app.run_polling(drop_pending_updates=True)
 
 if __name__=='__main__': main()
