@@ -3,7 +3,7 @@ from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from .service import analyze_symbol, format_report
-from .market import fetch_candles
+from .market import fetch_backtest_candles
 from .backtest import walk_forward
 from .realtime import configure_hub, get_hub
 from .storage import should_send_alert
@@ -14,11 +14,20 @@ WATCHLIST=[x.strip().upper() for x in os.getenv('WATCHLIST','BTC,ETH').split(','
 THRESH=float(os.getenv('ALERT_THRESHOLD','72'))
 ADMIN_CHAT_ID=os.getenv('ADMIN_CHAT_ID','').strip()
 
+BACKTEST_CFG={
+    '5m': {'bars':3000,'horizon':6,'step':6},
+    '15m':{'bars':3000,'horizon':4,'step':5},
+    '1h': {'bars':2160,'horizon':3,'step':3},
+    '4h': {'bars':720,'horizon':2,'step':2},
+    '1d': {'bars':300,'horizon':2,'step':1},
+    '1w': {'bars':300,'horizon':1,'step':1},
+}
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text('🤖 Crypto Multi-Agent Analyst V4 جاهز.\n/analyze BTC\n/scan\n/live\n/backtest BTC 1h\n/help')
+    await update.message.reply_text('🤖 Crypto Multi-Agent Analyst V4.1 جاهز.\n/analyze BTC\n/scan\n/live\n/backtest BTC 1h\n/help')
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text('/analyze BTC — تحليل 6 فريمات + Agents + Order Flow\n/scan — فحص قائمة العملات\n/live — حالة WebSocket والبيانات اللحظية\n/backtest BTC 1h — اختبار تاريخي أولي\nالإنذارات الدورية تعمل عند ضبط ADMIN_CHAT_ID.')
+    await update.message.reply_text('/analyze BTC — تحليل 6 فريمات + Agents + Order Flow\n/scan — فحص قائمة العملات\n/live — حالة WebSocket والبيانات اللحظية\n/backtest BTC 1h — Walk-forward تاريخي موسع + Calibration\nالإنذارات الدورية تعمل عند ضبط ADMIN_CHAT_ID.')
 
 async def analyze_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     symbol=(context.args[0] if context.args else 'BTC').upper().replace('USDT','').replace('-','')
@@ -40,30 +49,46 @@ async def scan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             out.append(f'{s}: error')
     await update.message.reply_text('\n'.join(out))
 
+
+def _bins_text(title,bins):
+    if not bins:
+        return f'{title}: لا توجد عينات كافية'
+    lines=[f'{title}:']
+    for b in bins:
+        lines.append(f"• {b['low']}-{b['high']}%: توقع {b['predicted_pct']:.1f}% / تحقق {b['realized_pct']:.1f}% (n={b['samples']})")
+    return '\n'.join(lines)
+
 async def backtest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     symbol=(context.args[0] if context.args else 'BTC').upper().replace('USDT','').replace('-','')
     timeframe=(context.args[1] if len(context.args)>1 else '1h').lower()
-    if timeframe not in ['5m','15m','1h','4h','1d','1w']:
+    if timeframe not in BACKTEST_CFG:
         await update.message.reply_text('الفريمات: 5m / 15m / 1h / 4h / 1d / 1w')
         return
-    msg=await update.message.reply_text(f'🧪 Backtest أولي {symbol} {timeframe}...')
+    cfg=BACKTEST_CFG[timeframe]
+    msg=await update.message.reply_text(f'🧪 V4.1 Backtest موسع {symbol} {timeframe}... قد يستغرق قليلاً')
     try:
-        df=await fetch_candles(symbol,timeframe,300)
-        horizon={'5m':6,'15m':4,'1h':3,'4h':2,'1d':2,'1w':1}[timeframe]
-        bt=walk_forward(df,timeframe,horizon=horizon,min_history=210,step=3)
-        await msg.edit_text(
-            f'🧪 Backtest {symbol} — {timeframe}\n'
-            f'Samples: {bt.samples}\n'
-            f'Accuracy: {bt.accuracy:.1f}%\n'
-            f'Long accuracy: {bt.bullish_accuracy:.1f}%\n'
-            f'Short accuracy: {bt.bearish_accuracy:.1f}%\n'
+        df=await fetch_backtest_candles(symbol,timeframe,cfg['bars'])
+        min_history=min(210,max(80,len(df)//3))
+        bt=walk_forward(df,timeframe,horizon=cfg['horizon'],min_history=min_history,step=cfg['step'])
+        start=bt.start[:10] if bt.start else '?'; end=bt.end[:10] if bt.end else '?'
+        text=(
+            f'🧪 V4.1 Backtest {symbol} — {timeframe}\n'
+            f'الفترة: {start} → {end}\n'
+            f'Candles: {bt.bars} | Signals: {bt.samples}\n'
+            f'Forward horizon: {bt.horizon_bars} bars\n\n'
+            f'Accuracy الكلية: {bt.accuracy:.1f}%\n'
+            f'LONG: {bt.bullish_accuracy:.1f}% (n={bt.long_samples})\n'
+            f'SHORT: {bt.bearish_accuracy:.1f}% (n={bt.short_samples})\n'
             f'Brier-like: {bt.brier_like:.4f}\n'
-            f'ECE calibration error: {bt.ece:.4f}\n'
-            + ('Calibration:\n' + '\n'.join(f"• {b['low']}-{b['high']}%: predicted {b['predicted_pct']:.1f}% / realized {b['realized_pct']:.1f}% (n={b['samples']})" for b in bt.calibration) + '\n\n' if bt.calibration else '\n') +
-            '⚠️ هذا اختبار قصير على آخر شموع OKX، وليس اعتماداً نهائياً للنموذج.'
+            f'ECE: {bt.ece:.4f}\n\n'
+            + _bins_text('Calibration الكلية',bt.calibration) + '\n\n'
+            + _bins_text('LONG calibration',bt.long_calibration) + '\n\n'
+            + _bins_text('SHORT calibration',bt.short_calibration) + '\n\n'
+            + '⚠️ النتيجة Walk-forward على البيانات المتاحة من OKX وليست ضماناً للأداء المستقبلي. نحتاج Out-of-sample قبل اعتماد أي نسبة كاحتمال حقيقي.'
         )
+        await msg.edit_text(text[:4000])
     except Exception as e:
-        await msg.edit_text(f'❌ خطأ Backtest: {e}')
+        await msg.edit_text(f'❌ خطأ Backtest V4.1: {e}')
 
 async def live_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     hub=get_hub()
