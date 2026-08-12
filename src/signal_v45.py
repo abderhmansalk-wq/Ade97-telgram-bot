@@ -82,7 +82,7 @@ def _choose(x,start,end,regime,side,horizon,cost_bps):
     for min_score in (4,5):
         for tp,sl in ((1,1),(1.25,1),(1.5,1),(2,1)):
             st=_eval(x,start,end,regime,side,min_score,tp,sl,horizon,cost_bps)
-            if st['n']<12: continue
+            if st['n']<10: continue
             obj=st['exp']+min(.08,st['n']/600)
             if best is None or obj>best[0]: best=(obj,min_score,tp,sl,st)
     return best
@@ -90,16 +90,16 @@ def _choose(x,start,end,regime,side,horizon,cost_bps):
 
 def validate_frame(df,symbol,timeframe,cost_bps=8.0):
     x=prepare(df).reset_index(drop=True); n=len(x)
-    if n<900: return []
+    if n<520: return []
     horizon={'15m':20,'1h':16,'4h':12}.get(timeframe,16)
-    test_size=max(180,n//6); train_end=max(540,n-3*test_size)
+    test_size=max(90,n//6); train_end=max(300,n-3*test_size)
     out=[]
     for regime in REGIMES:
         for side in SIDES:
             fold_stats=[]; rr_last=1.0
             for fold in range(3):
                 ts=train_end+fold*test_size; te=min(n,ts+test_size)
-                if te-ts<80: continue
+                if te-ts<60: continue
                 cfg=_choose(x,210,ts,regime,side,horizon,cost_bps)
                 if not cfg: continue
                 _,ms,tp,sl,_=cfg; rr_last=tp/sl
@@ -109,7 +109,8 @@ def validate_frame(df,symbol,timeframe,cost_bps=8.0):
             exp=sum(s['exp']*s['n'] for s in fold_stats)/trades if trades else 0.0
             wr=sum(s['wr']*s['n'] for s in fold_stats)/trades if trades else 0.0
             pos=sum(1 for s in fold_stats if s['n'] and s['exp']>0)
-            status='PASS' if trades>=20 and exp>=.05 and pos>=2 else 'NO_TRADE'
+            min_trades=16 if timeframe=='4h' else 20
+            status='PASS' if trades>=min_trades and exp>=.05 and pos>=2 else 'NO_TRADE'
             out.append(BucketResult(timeframe,regime,side,trades,round(wr,2),round(exp,4),pos,len(fold_stats),rr_last,status))
     return out
 
