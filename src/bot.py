@@ -6,6 +6,7 @@ from .service import analyze_symbol, format_report
 from .market import fetch_backtest_candles
 from .backtest import walk_forward
 from .optimizer import optimize_oos
+from .signal_v43 import validate_v43
 from .realtime import configure_hub, get_hub
 from .storage import should_send_alert
 
@@ -25,10 +26,10 @@ BACKTEST_CFG={
 }
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text('🤖 Crypto Multi-Agent Analyst V4.2 جاهز.\n/analyze BTC\n/scan\n/live\n/backtest BTC 1h\n/validate BTC 1h\n/help')
+    await update.message.reply_text('🤖 Crypto Multi-Agent Analyst V4.3 جاهز.\n/analyze BTC\n/scan\n/live\n/backtest BTC 1h\n/validate BTC 1h\n/validate43 BTC 1h\n/help')
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text('/analyze BTC — تحليل 6 فريمات + Agents + Order Flow\n/scan — فحص قائمة العملات\n/live — حالة WebSocket والبيانات اللحظية\n/backtest BTC 1h — Walk-forward تاريخي موسع + Calibration\n/validate BTC 1h — Optimization على Train ثم اختبار Out-of-Sample مستقل\nالإنذارات الدورية تعمل عند ضبط ADMIN_CHAT_ID.')
+    await update.message.reply_text('/analyze BTC — تحليل 6 فريمات + Agents + Order Flow\n/scan — فحص قائمة العملات\n/live — حالة WebSocket والبيانات اللحظية\n/backtest BTC 1h — Walk-forward تاريخي موسع + Calibration\n/validate BTC 1h — V4.2 أوزان + Out-of-Sample\n/validate43 BTC 1h — V4.3 Regime→Setup→Trigger→Confirmation→Risk + ATR barriers\nالإنذارات الدورية تعمل عند ضبط ADMIN_CHAT_ID.')
 
 async def analyze_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     symbol=(context.args[0] if context.args else 'BTC').upper().replace('USDT','').replace('-','')
@@ -66,14 +67,14 @@ async def backtest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text('الفريمات: 5m / 15m / 1h / 4h / 1d / 1w')
         return
     cfg=BACKTEST_CFG[timeframe]
-    msg=await update.message.reply_text(f'🧪 V4.2 Backtest موسع {symbol} {timeframe}...')
+    msg=await update.message.reply_text(f'🧪 V4.3 Backtest موسع {symbol} {timeframe}...')
     try:
         df=await fetch_backtest_candles(symbol,timeframe,cfg['bars'])
         min_history=min(210,max(80,len(df)//3))
         bt=walk_forward(df,timeframe,horizon=cfg['horizon'],min_history=min_history,step=cfg['step'])
         start=bt.start[:10] if bt.start else '?'; end=bt.end[:10] if bt.end else '?'
         text=(
-            f'🧪 V4.2 Backtest {symbol} — {timeframe}\n'
+            f'🧪 V4.3 Backtest {symbol} — {timeframe}\n'
             f'الفترة: {start} → {end}\n'
             f'Candles: {bt.bars} | Signals: {bt.samples}\n'
             f'Forward horizon: {bt.horizon_bars} bars\n\n'
@@ -89,7 +90,7 @@ async def backtest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await msg.edit_text(text[:4000])
     except Exception as e:
-        await msg.edit_text(f'❌ خطأ Backtest V4.2: {e}')
+        await msg.edit_text(f'❌ خطأ Backtest V4.3: {e}')
 
 async def validate_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     symbol=(context.args[0] if context.args else 'BTC').upper().replace('USDT','').replace('-','')
@@ -98,7 +99,7 @@ async def validate_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text('الفريمات: 5m / 15m / 1h / 4h / 1d / 1w')
         return
     cfg=BACKTEST_CFG[timeframe]
-    msg=await update.message.reply_text(f'🧠 V4.2 Optimization + OOS {symbol} {timeframe}... قد يستغرق قليلاً')
+    msg=await update.message.reply_text(f'🧠 V4.2 Optimization + OOS {symbol} {timeframe}...')
     try:
         df=await fetch_backtest_candles(symbol,timeframe,cfg['bars'])
         min_history=min(210,max(80,len(df)//3))
@@ -115,13 +116,48 @@ async def validate_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f'OOS LONG: {vr.test_long_accuracy:.1f}% (n={vr.test_long_samples})\n'
             f'OOS SHORT: {vr.test_short_accuracy:.1f}% (n={vr.test_short_samples})\n'
             f'OOS coverage: {vr.coverage_pct:.1f}%\n\n'
-            f'Decision threshold: {vr.threshold:.2f}\n'
-            f'Optimized weights:\n{weights}\n\n'
-            'الـOptimization يرى Train فقط. القرار PASS/NO TRADE مبني على الجزء الأخير الذي لم يُستخدم في اختيار الأوزان.'
+            f'Decision threshold: {vr.threshold:.2f}\nOptimized weights:\n{weights}\n\n'
+            'الـOptimization يرى Train فقط. القرار PASS/NO TRADE مبني على الجزء الأخير.'
         )
         await msg.edit_text(text[:4000])
     except Exception as e:
         await msg.edit_text(f'❌ خطأ V4.2 OOS: {e}')
+
+async def validate43_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    symbol=(context.args[0] if context.args else 'BTC').upper().replace('USDT','').replace('-','')
+    timeframe=(context.args[1] if len(context.args)>1 else '1h').lower()
+    if timeframe not in BACKTEST_CFG:
+        await update.message.reply_text('الفريمات: 5m / 15m / 1h / 4h / 1d / 1w')
+        return
+    cfg=BACKTEST_CFG[timeframe]
+    bars=max(cfg['bars'],2160 if timeframe=='1h' else cfg['bars'])
+    msg=await update.message.reply_text(f'🧪 V4.3 Layered + ATR OOS {symbol} {timeframe}...')
+    try:
+        df=await fetch_backtest_candles(symbol,timeframe,bars)
+        vr=validate_v43(df,symbol,timeframe)
+        status='✅ PASS' if vr.status=='PASS' else ('⛔ NO TRADE' if vr.status=='NO_TRADE' else '⚠️ DATA غير كافية')
+        rr=vr.tp_atr/vr.sl_atr if vr.sl_atr else 0
+        breakeven=100/(1+rr) if rr>0 else 100
+        text=(
+            f'🧪 V4.3 Layered OOS {symbol} — {timeframe}\n'
+            f'Status: {status}\n\n'
+            f'Logic: Regime → Setup → Trigger → Confirmation → Risk\n'
+            f'Outcome: TP/SL ATR barrier — first touch wins\n\n'
+            f'Train candidates: {vr.train_candidates} | resolved trades: {vr.train_trades}\n'
+            f'Train win rate: {vr.train_win_rate:.1f}%\n\n'
+            f'OOS candidates: {vr.test_candidates} | resolved trades: {vr.test_trades}\n'
+            f'OOS win rate: {vr.test_win_rate:.1f}%\n'
+            f'OOS LONG: {vr.test_long_win_rate:.1f}% (n={vr.test_long_trades})\n'
+            f'OOS SHORT: {vr.test_short_win_rate:.1f}% (n={vr.test_short_trades})\n'
+            f'OOS coverage: {vr.coverage_pct:.1f}%\n\n'
+            f'Min layer score: {vr.min_score}/5\n'
+            f'TP: {vr.tp_atr:.2f} ATR | SL: {vr.sl_atr:.2f} ATR | R:R≈{rr:.2f}\n'
+            f'Horizon: {vr.horizon_bars} bars | Break-even WR≈{breakeven:.1f}%\n\n'
+            'PASS يحتاج Edge خارج العينة فوق نقطة التعادل مع عدد صفقات كافٍ. خلاف ذلك يبقى NO TRADE.'
+        )
+        await msg.edit_text(text[:4000])
+    except Exception as e:
+        await msg.edit_text(f'❌ خطأ V4.3 Layered OOS: {e}')
 
 async def live_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     hub=get_hub()
@@ -164,6 +200,7 @@ def main():
     app.add_handler(CommandHandler('live',live_cmd))
     app.add_handler(CommandHandler('backtest',backtest_cmd))
     app.add_handler(CommandHandler('validate',validate_cmd))
+    app.add_handler(CommandHandler('validate43',validate43_cmd))
     app.job_queue.run_repeating(alert_job, interval=300, first=20)
     app.run_polling(drop_pending_updates=True)
 
