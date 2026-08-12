@@ -36,7 +36,13 @@ def format_report(symbol,results,best,m):
         arrow='🟢' if r.direction=='صاعد' else ('🔴' if r.direction=='هابط' else '⚪️')
         lines.append(f'{arrow} {r.timeframe}: {r.direction} | ↑ {r.bullish_pct:.0f}% ↓ {r.bearish_pct:.0f}% | توافق {r.agreement:.0f}% | دخول {r.entry_quality:.0f}%')
     side='LONG' if best.direction=='صاعد' else ('SHORT' if best.direction=='هابط' else 'WAIT')
-    lines += ['',f'🎯 أفضل فريم للتنفيذ: {best.timeframe}',f'الاتجاه المرشح: {side}',f'جودة الإعداد: {best.entry_quality:.0f}%',f'الثقة الفنية: {best.confidence:.0f}%',f'توافق الـAgents: {best.agreement:.0f}%',f'دعم تقريبي: {best.support:,.4f}',f'مقاومة تقريبية: {best.resistance:,.4f}','','أقوى أسباب القرار:']
+    if best.entry_quality < 70 or best.agreement < 67:
+        side='WAIT'
+    if m.get('regime')=='BULL' and best.direction=='هابط':
+        side='WAIT'
+    if m.get('regime')=='BEAR' and best.direction=='صاعد':
+        side='WAIT'
+    lines += ['',f'🎯 أفضل فريم للتنفيذ: {best.timeframe}',f'الاتجاه المرشح: {side}',f'جودة الإعداد: {best.entry_quality:.0f}%',f'Signal Score: {best.confidence:.0f}%',f'توافق الـAgents: {best.agreement:.0f}%',f'دعم تقريبي: {best.support:,.4f}',f'مقاومة تقريبية: {best.resistance:,.4f}','','أقوى أسباب القرار:']
     lines += [f'• {x}' for x in best.reasons]
-    lines += ['', '⚠️ هذه Scores تحليلية وليست ضماناً للربح. الاحتمالات الإحصائية الحقيقية تحتاج Backtest ومعايرة.']
+    lines += ['', '⚠️ Signal Score ليس احتمالاً إحصائياً. استخدم /validate للعملة والفريم قبل اعتبار أي إعداد قابلاً للتداول.']
     return '\n'.join(lines)
