@@ -17,9 +17,10 @@ def main():
     r=validate_v45('BTC',frames,8.0)
     assert r.status in ('PASS','NO_TRADE')
     assert len(r.buckets)>0
+    assert any(b['trades']>0 or b['folds']>0 for b in r.buckets), 'all regime buckets are empty'
     for b in r.buckets:
         assert b['regime'] in ('TREND','RANGE','HIGH_VOL')
         assert b['side'] in ('LONG','SHORT')
-    print('V4.5 smoke OK',r.status,len(r.buckets))
+    print('V4.5 smoke OK',r.status,len(r.buckets),sum(b['trades'] for b in r.buckets))
 
 if __name__=='__main__': main()
