@@ -1,2 +1,2 @@
-from src.bot_v50 import main
+from src.bot_v51 import main
 main()
