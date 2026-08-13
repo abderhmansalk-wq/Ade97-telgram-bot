@@ -1,7 +1,6 @@
 import os
 import json
 import sqlite3
-from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Optional
 
@@ -148,13 +147,18 @@ def _recent_closed(limit=20):
     return [dict(r) for r in rows]
 
 
-def _can_open(signal_index:int):
+def _can_open(signal_ts):
     if _open_trade(): return False,'one-position-at-a-time: position already open'
     closed=_recent_closed(20)
     if len(closed)>=2 and all(float(x.get('pnl_r') or 0)<0 for x in closed[:2]):
-        last_loss_idx=get_state('last_loss_signal_index',None)
-        if last_loss_idx is not None and signal_index-int(last_loss_idx)<LOSS_COOLDOWN_BARS:
-            return False,f'loss_cooldown active ({LOSS_COOLDOWN_BARS} bars after 2 losses)'
+        last_loss_ts=get_state('last_loss_ts',None)
+        if last_loss_ts:
+            try:
+                elapsed=pd.Timestamp(signal_ts)-pd.Timestamp(last_loss_ts)
+                if elapsed < pd.Timedelta(hours=4*LOSS_COOLDOWN_BARS):
+                    return False,f'loss_cooldown active ({LOSS_COOLDOWN_BARS} x 4h bars after 2 losses)'
+            except Exception:
+                pass
     return True,''
 
 
@@ -163,14 +167,14 @@ def _cost_r(entry,atr,cost_bps):
     return (float(cost_bps)/10000.0)*float(entry)/float(atr)
 
 
-def _close_trade(trade,ts,exit_price,gross_r,outcome,signal_index):
+def _close_trade(trade,ts,exit_price,gross_r,outcome):
     net_r=float(gross_r)-_cost_r(trade['entry'],trade['atr'],trade['cost_bps'])
     with _conn() as c:
         c.execute("UPDATE paper_trades SET closed_ts=?,status='CLOSED',pnl_r=?,exit_price=?,outcome=? WHERE id=?",
                   (str(ts),net_r,float(exit_price),str(outcome),int(trade['id'])))
         c.commit()
     if net_r<0:
-        set_state('last_loss_signal_index',int(signal_index))
+        set_state('last_loss_ts',str(ts))
     return net_r
 
 
@@ -181,22 +185,22 @@ def _manage_open(x):
     newer=x[x.ts>opened]
     if newer.empty: return None
     # First-touch, conservative if TP and SL are touched in the same candle: SL wins.
-    for idx,row in newer.iterrows():
+    for _,row in newer.iterrows():
         lo=float(row.low); hi=float(row.high)
         if lo<=float(trade['sl']) and hi>=float(trade['tp']):
-            r=_close_trade(trade,row.ts,trade['sl'],-1.0,'SL_same_bar_conservative',int(idx))
+            r=_close_trade(trade,row.ts,trade['sl'],-1.0,'SL_same_bar_conservative')
             return {'type':'CLOSED','trade':trade,'pnl_r':r,'outcome':'SL (same candle conservative)','ts':str(row.ts)}
         if lo<=float(trade['sl']):
-            r=_close_trade(trade,row.ts,trade['sl'],-1.0,'SL',int(idx))
+            r=_close_trade(trade,row.ts,trade['sl'],-1.0,'SL')
             return {'type':'CLOSED','trade':trade,'pnl_r':r,'outcome':'SL','ts':str(row.ts)}
         if hi>=float(trade['tp']):
-            r=_close_trade(trade,row.ts,trade['tp'],SETUP['rr'],'TP',int(idx))
+            r=_close_trade(trade,row.ts,trade['tp'],SETUP['rr'],'TP')
             return {'type':'CLOSED','trade':trade,'pnl_r':r,'outcome':'TP','ts':str(row.ts)}
     return None
 
 
 def _latest_closed_index(df):
-    # OKX newest candle may still be forming; using the penultimate candle prevents look-ahead/partial-bar entries.
+    # OKX newest candle may still be forming; using the penultimate candle prevents partial-bar entries.
     return len(df)-2
 
 
@@ -211,9 +215,11 @@ def _try_open(x,atr_cutoff):
     if classify_regime(x,i,atr_cutoff)!='RANGE': return None
     side,score=_range_signal(x,i)
     if side!='LONG' or int(score)<SETUP['min_score']: return None
-    allowed,reason=_can_open(i)
+    allowed,reason=_can_open(signal_ts)
     if not allowed:
-        # Record suppressed signal for audit, but it is not a trade.
+        last=get_state('last_suppressed',{}) or {}
+        if last.get('signal_ts')==signal_ts and last.get('reason')==reason:
+            return None
         set_state('last_suppressed',{'signal_ts':signal_ts,'reason':reason,'score':int(score)})
         return {'type':'SUPPRESSED','reason':reason,'signal_ts':signal_ts}
     entry=float(row.close); atr=float(row.atr); atr_pct=atr/entry*100 if entry else 0.0
@@ -223,7 +229,7 @@ def _try_open(x,atr_cutoff):
                      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
                   (signal_ts,signal_ts,'BTC','4h','RANGE','LONG',entry,tp,sl,atr,atr_pct,float(atr_cutoff),int(score),COST_BPS,'OPEN','V5.0 forward paper; frozen setup'))
         c.commit()
-    set_state('last_signal_index',i)
+    set_state('last_signal_ts',signal_ts)
     return {'type':'OPENED','signal_ts':signal_ts,'entry':entry,'tp':tp,'sl':sl,'atr':atr,'atr_pct':atr_pct,'hv_cut':atr_cutoff,'score':int(score)}
 
 
