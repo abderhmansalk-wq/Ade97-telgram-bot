@@ -1,7 +1,6 @@
 from dataclasses import dataclass, asdict, field
 import pandas as pd
 from .agents import prepare
-from .signal_v43 import _layer_signal
 from .signal_v44 import _trade_pnl_r
 
 REGIMES=('TREND','RANGE','HIGH_VOL')
@@ -37,33 +36,94 @@ def classify_regime(x: pd.DataFrame, i: int) -> str:
     close=float(r.close); a=float(r.atr or 0)
     if not close or not a: return 'RANGE'
     atr_pct=a/close*100
-    if atr_pct >= 1.8:
-        return 'HIGH_VOL'
     e20=float(r.ema20); e50=float(r.ema50); e200=float(r.ema200)
     slope50=(e50-float(x.ema50.iloc[max(0,i-8)]))/(close or 1)
     spread=abs(e20-e50)/(close or 1)
-    trend=(close>e200 and e20>e50 and slope50>.0015) or (close<e200 and e20<e50 and slope50<-.0015)
-    if trend and spread>.0015:
+    if atr_pct >= 1.8:
+        return 'HIGH_VOL'
+    trend=(close>e200 and e20>e50 and slope50>.0010) or (close<e200 and e20<e50 and slope50<-.0010)
+    if trend and spread>.0010:
         return 'TREND'
     return 'RANGE'
 
 
-def _signal_for_regime(x,i,regime):
-    side,score,reasons=_layer_signal(x,i)
-    if side=='WAIT': return side,score,reasons
-    actual=classify_regime(x,i)
-    if actual!=regime: return 'WAIT',0,['Regime mismatch']
+def _trend_signal(x,i):
+    r=x.iloc[i]; prev=x.iloc[i-1]
+    close=float(r.close); e20=float(r.ema20); e50=float(r.ema50); e200=float(r.ema200)
+    rv=float(r.rsi) if pd.notna(r.rsi) else 50
+    macd=float(r.macd); sig=float(r.macds)
+    body=abs(float(r.close-r.open)); spread=max(float(r.high-r.low),1e-12)
+    score=0
+    if close>e200 and e20>e50:
+        side='LONG'
+        if rv>=50: score+=1
+        if macd>sig: score+=1
+        if close>float(x.high.iloc[i-6:i].max()): score+=1
+        if float(r.close)>float(r.open) and body/spread>=.30: score+=1
+        return side,score
+    if close<e200 and e20<e50:
+        side='SHORT'
+        if rv<=50: score+=1
+        if macd<sig: score+=1
+        if close<float(x.low.iloc[i-6:i].min()): score+=1
+        if float(r.close)<float(r.open) and body/spread>=.30: score+=1
+        return side,score
+    return 'WAIT',0
+
+
+def _range_signal(x,i):
     r=x.iloc[i]
-    if regime=='RANGE':
-        rv=float(r.rsi) if pd.notna(r.rsi) else 50
-        hi=float(x.high.iloc[i-20:i].max()); lo=float(x.low.iloc[i-20:i].min())
-        pos=(float(r.close)-lo)/(hi-lo or 1e-12)
-        if side=='LONG' and not (pos<.35 and rv<48): return 'WAIT',0,['Range filter']
-        if side=='SHORT' and not (pos>.65 and rv>52): return 'WAIT',0,['Range filter']
-    elif regime=='HIGH_VOL':
-        body=abs(float(r.close-r.open)); spread=max(float(r.high-r.low),1e-12)
-        if body/spread<.5: return 'WAIT',0,['Weak high-vol candle']
-    return side,score,reasons
+    rv=float(r.rsi) if pd.notna(r.rsi) else 50
+    hi=float(x.high.iloc[i-24:i].max()); lo=float(x.low.iloc[i-24:i].min())
+    width=max(hi-lo,1e-12); pos=(float(r.close)-lo)/width
+    body=abs(float(r.close-r.open)); spread=max(float(r.high-r.low),1e-12)
+    score=0
+    if pos<=.30 and rv<=45:
+        side='LONG'
+        if float(r.close)>float(r.open): score+=1
+        if body/spread>=.25: score+=1
+        if float(r.low)<=float(x.low.iloc[i-6:i].min()): score+=1
+        if float(r.close)>lo: score+=1
+        return side,score
+    if pos>=.70 and rv>=55:
+        side='SHORT'
+        if float(r.close)<float(r.open): score+=1
+        if body/spread>=.25: score+=1
+        if float(r.high)>=float(x.high.iloc[i-6:i].max()): score+=1
+        if float(r.close)<hi: score+=1
+        return side,score
+    return 'WAIT',0
+
+
+def _highvol_signal(x,i):
+    r=x.iloc[i]
+    close=float(r.close); body=abs(float(r.close-r.open)); spread=max(float(r.high-r.low),1e-12)
+    if body/spread<.45: return 'WAIT',0
+    rv=float(r.rsi) if pd.notna(r.rsi) else 50
+    hi=float(x.high.iloc[i-10:i].max()); lo=float(x.low.iloc[i-10:i].min())
+    score=0
+    if close>hi and float(r.close)>float(r.open):
+        if rv>=55: score+=1
+        if float(r.macd)>float(r.macds): score+=1
+        if body/spread>=.60: score+=1
+        if pd.notna(r.vma) and r.vma and float(r.vol)>=float(r.vma): score+=1
+        return 'LONG',score
+    if close<lo and float(r.close)<float(r.open):
+        if rv<=45: score+=1
+        if float(r.macd)<float(r.macds): score+=1
+        if body/spread>=.60: score+=1
+        if pd.notna(r.vma) and r.vma and float(r.vol)>=float(r.vma): score+=1
+        return 'SHORT',score
+    return 'WAIT',0
+
+
+def _signal_for_regime(x,i,regime):
+    if i<210 or classify_regime(x,i)!=regime:
+        return 'WAIT',0,[]
+    if regime=='TREND': side,score=_trend_signal(x,i)
+    elif regime=='RANGE': side,score=_range_signal(x,i)
+    else: side,score=_highvol_signal(x,i)
+    return side,score,[regime] if side!='WAIT' else []
 
 
 def _eval(x,start,end,regime,side,min_score,tp,sl,horizon,cost_bps):
@@ -79,10 +139,11 @@ def _eval(x,start,end,regime,side,min_score,tp,sl,horizon,cost_bps):
 
 def _choose(x,start,end,regime,side,horizon,cost_bps):
     best=None
-    for min_score in (4,5):
+    score_grid=(2,3,4)
+    for min_score in score_grid:
         for tp,sl in ((1,1),(1.25,1),(1.5,1),(2,1)):
             st=_eval(x,start,end,regime,side,min_score,tp,sl,horizon,cost_bps)
-            if st['n']<10: continue
+            if st['n']<8: continue
             obj=st['exp']+min(.08,st['n']/600)
             if best is None or obj>best[0]: best=(obj,min_score,tp,sl,st)
     return best
@@ -109,7 +170,7 @@ def validate_frame(df,symbol,timeframe,cost_bps=8.0):
             exp=sum(s['exp']*s['n'] for s in fold_stats)/trades if trades else 0.0
             wr=sum(s['wr']*s['n'] for s in fold_stats)/trades if trades else 0.0
             pos=sum(1 for s in fold_stats if s['n'] and s['exp']>0)
-            min_trades=16 if timeframe=='4h' else 20
+            min_trades=12 if timeframe=='4h' else 16
             status='PASS' if trades>=min_trades and exp>=.05 and pos>=2 else 'NO_TRADE'
             out.append(BucketResult(timeframe,regime,side,trades,round(wr,2),round(exp,4),pos,len(fold_stats),rr_last,status))
     return out
