@@ -12,7 +12,7 @@ from .market import fetch_backtest_candles
 from .signal_v45 import _range_signal
 from .signal_v46 import classify_regime, _atr_pct_series
 
-# Frozen after V4.9.1. V5.0 is FORWARD PAPER ONLY: no exchange orders, no optimization.
+# Frozen after V4.9.1. V5.x is FORWARD PAPER ONLY: no exchange orders, no optimization.
 SETUP={
     'symbol':'BTC','timeframe':'4h','regime':'RANGE','side':'LONG',
     'rr':2.0,'min_score':2,'horizon':12,
@@ -173,8 +173,7 @@ def _close_trade(trade,ts,exit_price,gross_r,outcome):
         c.execute("UPDATE paper_trades SET closed_ts=?,status='CLOSED',pnl_r=?,exit_price=?,outcome=? WHERE id=?",
                   (str(ts),net_r,float(exit_price),str(outcome),int(trade['id'])))
         c.commit()
-    if net_r<0:
-        set_state('last_loss_ts',str(ts))
+    if net_r<0: set_state('last_loss_ts',str(ts))
     return net_r
 
 
@@ -184,7 +183,6 @@ def _manage_open(x):
     opened=pd.Timestamp(trade['opened_ts'])
     newer=x[x.ts>opened]
     if newer.empty: return None
-    # First-touch, conservative if TP and SL are touched in the same candle: SL wins.
     for _,row in newer.iterrows():
         lo=float(row.low); hi=float(row.high)
         if lo<=float(trade['sl']) and hi>=float(trade['tp']):
@@ -199,16 +197,13 @@ def _manage_open(x):
     return None
 
 
-def _latest_closed_index(df):
-    # OKX newest candle may still be forming; using the penultimate candle prevents partial-bar entries.
-    return len(df)-2
+def _latest_closed_index(df): return len(df)-2
 
 
 def _try_open(x,atr_cutoff):
     i=_latest_closed_index(x)
     if i<210: return None
-    row=x.iloc[i]
-    signal_ts=str(row.ts)
+    row=x.iloc[i]; signal_ts=str(row.ts)
     with _conn() as c:
         exists=c.execute('SELECT id FROM paper_trades WHERE signal_ts=?',(signal_ts,)).fetchone()
     if exists: return None
@@ -218,8 +213,7 @@ def _try_open(x,atr_cutoff):
     allowed,reason=_can_open(signal_ts)
     if not allowed:
         last=get_state('last_suppressed',{}) or {}
-        if last.get('signal_ts')==signal_ts and last.get('reason')==reason:
-            return None
+        if last.get('signal_ts')==signal_ts and last.get('reason')==reason: return None
         set_state('last_suppressed',{'signal_ts':signal_ts,'reason':reason,'score':int(score)})
         return {'type':'SUPPRESSED','reason':reason,'signal_ts':signal_ts}
     entry=float(row.close); atr=float(row.atr); atr_pct=atr/entry*100 if entry else 0.0
@@ -227,20 +221,62 @@ def _try_open(x,atr_cutoff):
     with _conn() as c:
         c.execute('''INSERT INTO paper_trades(signal_ts,opened_ts,symbol,timeframe,regime,side,entry,tp,sl,atr,atr_pct,hv_cut,score,cost_bps,status,note)
                      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
-                  (signal_ts,signal_ts,'BTC','4h','RANGE','LONG',entry,tp,sl,atr,atr_pct,float(atr_cutoff),int(score),COST_BPS,'OPEN','V5.0 forward paper; frozen setup'))
+                  (signal_ts,signal_ts,'BTC','4h','RANGE','LONG',entry,tp,sl,atr,atr_pct,float(atr_cutoff),int(score),COST_BPS,'OPEN','V5.x forward paper; frozen setup'))
         c.commit()
     set_state('last_signal_ts',signal_ts)
     return {'type':'OPENED','signal_ts':signal_ts,'entry':entry,'tp':tp,'sl':sl,'atr':atr,'atr_pct':atr_pct,'hv_cut':atr_cutoff,'score':int(score)}
 
 
+async def explain_now():
+    """Explain why the frozen forward-paper setup is or is not eligible on the latest closed 4h candle."""
+    df=await fetch_backtest_candles('BTC','4h',1800)
+    x=prepare(df).reset_index(drop=True)
+    i=_latest_closed_index(x)
+    if i<210: return {'ready':False,'reason':'insufficient history'}
+    row=x.iloc[i]; signal_ts=str(row.ts)
+    atrp=_atr_pct_series(x).iloc[210:i].dropna()
+    if len(atrp)<300: return {'ready':False,'reason':'ATR calibration history too short'}
+    hv_cut=float(atrp.quantile(.80))
+    regime=classify_regime(x,i,hv_cut)
+    side,score=_range_signal(x,i)
+    atr=float(row.atr); close=float(row.close); atr_pct=atr/close*100 if close else 0.0
+    allowed,block_reason=_can_open(signal_ts)
+    open_trade=_open_trade()
+
+    checks={
+        'engine_on':is_enabled(),
+        'regime_ok':regime=='RANGE',
+        'side_ok':side=='LONG',
+        'score_ok':int(score)>=SETUP['min_score'],
+        'risk_ok':allowed,
+    }
+    if not checks['engine_on']:
+        reason='Engine is OFF'
+    elif not checks['regime_ok']:
+        reason=f'Regime={regime}, المطلوب RANGE'
+    elif not checks['side_ok']:
+        reason=f'Range trigger={side or "NONE"}, المطلوب LONG'
+    elif not checks['score_ok']:
+        reason=f'Score={int(score)}, المطلوب >= {SETUP["min_score"]}'
+    elif not checks['risk_ok']:
+        reason=block_reason
+    else:
+        reason='كل شروط الدخول متحققة على آخر شمعة مغلقة'
+
+    return {
+        'ready':all(checks.values()),'reason':reason,'signal_ts':signal_ts,'close':close,
+        'regime':regime,'side':side or 'NONE','score':int(score),'min_score':SETUP['min_score'],
+        'atr':atr,'atr_pct':atr_pct,'hv_cut':hv_cut,'checks':checks,
+        'open_trade':open_trade,'last_tick_ts':get_state('last_tick_ts',None),
+    }
+
+
 async def paper_tick():
-    """One forward-only evaluation. Safe to call frequently; acts once per closed 4h candle."""
     if not is_enabled(): return []
     df=await fetch_backtest_candles('BTC','4h',1800)
     x=prepare(df).reset_index(drop=True)
     i=_latest_closed_index(x)
     if i<210: return []
-    # Live cutoff uses only information available before the signal candle.
     atrp=_atr_pct_series(x).iloc[210:i].dropna()
     if len(atrp)<300: return []
     atr_cutoff=float(atrp.quantile(.80))
