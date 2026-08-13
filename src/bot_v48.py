@@ -5,16 +5,17 @@ from .market import fetch_backtest_candles
 from .signal_v48 import validate_v48
 
 async def start(update, context):
-    await update.message.reply_text('🤖 Crypto Multi-Agent Analyst V4.8 جاهز.\n/analyze BTC\n/scan\n/live\n/validate48 BTC\n/help')
+    await update.message.reply_text('🤖 Crypto Multi-Agent Analyst V4.8.1 جاهز.\n/analyze BTC\n/scan\n/live\n/validate48 BTC\n/help')
 
 async def help_cmd(update, context):
-    await update.message.reply_text('/analyze BTC — تحليل 6 فريمات + Agents + Order Flow\n/scan — فحص القائمة\n/live — حالة WebSocket\n/validate47 BTC — Final robustness gate\n/validate48 BTC — Risk Overlay على BTC 4h RANGE LONG')
+    await update.message.reply_text('/analyze BTC — تحليل 6 فريمات + Agents + Order Flow\n/scan — فحص القائمة\n/live — حالة WebSocket\n/validate47 BTC — Final robustness gate\n/validate48 BTC — V4.8.1 Risk Overlay على نفس عينة V4.7 (1500 شمعة 4h)')
 
 async def validate48_cmd(update, context):
     symbol=(context.args[0] if context.args else 'BTC').upper().replace('USDT','').replace('-','')
-    msg=await update.message.reply_text(f'🛡️ V4.8 Risk Overlay {symbol} 4h... قد يستغرق 1–3 دقائق')
+    msg=await update.message.reply_text(f'🛡️ V4.8.1 Risk Overlay {symbol} 4h على نفس عينة V4.7... قد يستغرق 1–3 دقائق')
     try:
-        df=await fetch_backtest_candles(symbol,'4h',1200)
+        # Must match V4.7 exactly so baseline is directly comparable.
+        df=await fetch_backtest_candles(symbol,'4h',1500)
         vr=validate_v48(df,symbol)
         status='✅ PAPER_READY' if vr.status=='PAPER_READY' else ('⏸ HOLD' if vr.status=='HOLD' else vr.status)
         ranked=sorted(vr.overlays,key=lambda o:(o['status']=='PAPER_READY',-o['max_drawdown_r'],o['expectancy_r']),reverse=True)
@@ -22,10 +23,10 @@ async def validate48_cmd(update, context):
         for o in ranked:
             flag='✅' if o['status']=='PAPER_READY' else '•'
             rows.append(f"{flag} {o['name']} | n={o['trades']} | WR {o['win_rate']:.1f}% | EV {o['expectancy_r']:+.3f}R | PF {o['profit_factor']:.2f} | MDD {o['max_drawdown_r']:.2f}R | LLS {o['longest_losing_streak']} | MC95 {o['monte_carlo_mdd_p95']:.2f}R\n{o['reason']}")
-        text=(f'🛡️ V4.8 Risk Overlay {symbol} — 4h RANGE LONG\nStatus: {status}\nأفضل Overlay: {vr.best_overlay}\n\n'+'\n'.join(rows)+"\n\nPAPER_READY يتطلب n≥35، EV≥+0.10R، PF≥1.20، MDD≤10R، وMonte Carlo MDD 95%≤14R. قواعد الدخول ثابتة؛ الاختبار يغير إدارة المخاطر فقط.")
+        text=(f'🛡️ V4.8.1 Risk Overlay {symbol} — 4h RANGE LONG\nStatus: {status}\nأفضل Overlay: {vr.best_overlay}\nSample: 1500 bars (مطابق V4.7)\n\n'+'\n'.join(rows)+"\n\nPAPER_READY يتطلب n≥35، EV≥+0.10R، PF≥1.20، MDD≤10R، وMonte Carlo MDD 95%≤14R. قواعد الدخول ثابتة؛ الاختبار يغير إدارة المخاطر فقط.")
         await msg.edit_text(text[:4000])
     except Exception as e:
-        await msg.edit_text(f'❌ خطأ V4.8: {e}')
+        await msg.edit_text(f'❌ خطأ V4.8.1: {e}')
 
 
 def main():
