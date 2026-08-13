@@ -1,4 +1,4 @@
-name: V4.8 CI
+name: V4.9 CI
 
 on:
   push:
@@ -30,3 +30,4 @@ jobs:
           python tests_v46.py
           python tests_v47.py
           python tests_v48.py
+          python tests_v49.py
